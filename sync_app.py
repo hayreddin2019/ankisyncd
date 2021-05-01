@@ -14,21 +14,17 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import gzip,ssl
-import hashlib
+import gzip
 import io
 import json
 import logging
 import os
 import random
 import re
-import string
 import sys
 import time
 import unicodedata
 import zipfile
-from configparser import ConfigParser
-from sqlite3 import dbapi2 as sqlite
 
 from webob import Response
 from webob.dec import wsgify
@@ -118,6 +114,8 @@ class SyncCollectionHandler(Syncer):
         self.minUsn = minUsn
         self.lnewer = not lnewer
         lgraves = self.removed()
+        if graves==None:
+            graves={'cards': [], 'notes': [], 'decks': []}
         self.remove(graves)
         return lgraves
 
@@ -175,7 +173,7 @@ class SyncCollectionHandler(Syncer):
         ]
 
     def getTags(self):
-        return [t for t, usn in self.col.tags.allItems()
+        return [t for t, usn in self.allItems()
                 if usn >= self.minUsn]
 
 class SyncMediaHandler:
@@ -467,9 +465,7 @@ class SyncApp:
             hkey = req.params['k']
         except KeyError:
             hkey = None
-
         session = self.session_manager.load(hkey, self.create_session)
-
         if session is None:
             try:
                 skey = req.POST['sk']
@@ -530,6 +526,7 @@ class SyncApp:
                 return result
 
             elif url == 'download':
+
                 thread = session.get_thread()
                 result = thread.execute(self.operation_download, [session])
                 return result

@@ -10,14 +10,13 @@ import random
 import requests
 import json
 import os
+from typing import List,Tuple
 
-from anki.db import DB, DBError
+from anki.db import DB
 from anki.utils import ids2str, intTime, platDesc, checksum, devMode
 from anki.consts import *
-from anki.config import ConfigManager
 from anki.utils import versionWithBuild
 import anki
-from anki.lang import ngettext
 
 
 # https://github.com/ankitects/anki/blob/04b1ca75599f18eb783a8bf0bdeeeb32362f4da0/rslib/src/sync/http_client.rs#L11
@@ -52,13 +51,12 @@ class Syncer(object):
         )
 
     def changes(self):
-        print("we")
         "Bundle up small objects."
         d = dict(models=self.getModels(),
                  decks=self.getDecks(),
                  tags=self.getTags())
         if self.lnewer:
-            d['conf'] = json.loads(self.col.backend.get_all_config())
+            d['conf'] = json.loads(self.col._backend.get_all_config())
             d['crt'] = self.col.crt
         return d
 
@@ -73,9 +71,40 @@ class Syncer(object):
         if 'crt' in rchg:
             self.col.crt = rchg['crt']
         self.prepareToChunk()
+    
+    def basicCheck(self) -> bool:
+        "Basic integrity check for syncing. True if ok."
+        # cards without notes
+        if self.col.db.scalar(
+            """
+select 1 from cards where nid not in (select id from notes) limit 1"""
+        ):
+            return False
+        # notes without cards or models
+        if self.col.db.scalar(
+            """
+select 1 from notes where id not in (select distinct nid from cards)
+or mid not in %s limit 1"""
+            % ids2str(self.col.models.ids())
+        ):
+            return False
+        # invalid ords
+        for m in self.col.models.all():
+            # ignore clozes
+            if m["type"] != MODEL_STD:
+                continue
+            if self.col.db.scalar(
+                """
+select 1 from cards where ord not in %s and nid in (
+select id from notes where mid = ?) limit 1"""
+                % ids2str([t["ord"] for t in m["tmpls"]]),
+                m["id"],
+            ):
+                return False
+        return True
 
     def sanityCheck(self, full):
-        if not self.col.basicCheck():
+        if not self.basicCheck():
             return "failed basic check"
         for t in "cards", "notes", "revlog", "graves":
             if self.col.db.scalar(
@@ -84,7 +113,7 @@ class Syncer(object):
         for g in self.col.decks.all():
             if g['usn'] == -1:
                 return "deck had usn = -1"
-        for t, usn in self.col.tags.allItems():
+        for t, usn in self.allItems():
             if usn == -1:
                 return "tag had usn = -1"
         found = False
@@ -187,7 +216,6 @@ from notes where %s""" % lim, self.maxUsn)
 
     def remove(self, graves):
          # remove card and the card's orphaned notes
-        print(graves)
         self.col.remove_cards_and_orphaned_notes(graves['cards'])
 
         # only notes
@@ -279,9 +307,13 @@ from notes where %s""" % lim, self.maxUsn)
     # Tags
     ##########################################################################
 
+    # # List of (tag, usn)
+    def allItems(self) -> List[Tuple[str, int]]:
+        tags=self.col.db.execute("select tag, usn from tags")
+        return [(tag, int(usn)) for tag,usn in tags]
     def getTags(self):
         tags = []
-        for t, usn in self.col.tags.allItems():
+        for t, usn in self.allItems():
             if usn == -1:
                 self.col.tags.tags[t] = self.maxUsn
                 tags.append(t)
@@ -334,9 +366,10 @@ from notes where %s""" % lim, self.maxUsn)
 
     def mergeConf(self, conf):
         # newConf = ConfigManager(self.col)
-        # for key, value in conf.items():
-        #     self.col.set_config(key, value)
-        self.col.backend.set_all_config(json.dumps(conf).encode())
+        for key, value in conf.items():
+            self.col.set_config(key, value)
+        # self.set_all_config(conf)
+        # self.set_all_config(json.dumps(conf).encode())
 # Wrapper for requests that tracks upload/download progress
 ##########################################################################
 
@@ -572,7 +605,7 @@ class FullSyncer(HttpSyncer):
         # make sure it's ok before we try to upload
         if self.col.db.scalar("pragma integrity_check") != "ok":
             return False
-        if not self.col.basicCheck():
+        if not self.basicCheck():
             return False
         # apply some adjustments, then upload
         self.col.beforeUpload()
